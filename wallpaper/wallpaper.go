@@ -2,9 +2,9 @@ package wallpaper
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -13,192 +13,167 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
-	jsoniter "github.com/json-iterator/go"
 	"golang.org/x/sys/windows/registry"
 	"gopkg.in/ini.v1"
 )
 
 type Wallpaper struct {
-	Type        string
-	AK          string
-	Keywords    string
-	ID          string
-	ImageURL    string
-	Description string
 	Dir         string
-	ExePath     string
+	Exec        string
+	CfgPath     string
+	ImgSavePath string
+	Flag        string
+	Type        string
+	Engine      engineface
+	TempNum     int
+	NowCount    int
+	MaxCount    int
+	NextImageID string
 }
 
-type WallpaperConfig struct {
-	PixabayAK  string
-	UnsplashAK string
-	Type       string
-	Keywords   string
-}
+func (w *Wallpaper) LoadConfig() {
+	// 读取文件执行路径
+	file, _ := exec.LookPath(os.Args[0])
+	path, _ := filepath.Abs(file)
+	w.Exec = path
+	w.Dir = filepath.Dir(path)
+	w.CfgPath = filepath.ToSlash(fmt.Sprintf("%s/config.ini", w.Dir))
 
-type Wallpaperface interface {
-	GetImageInfo(w *Wallpaper)
-}
-type pixRes struct {
-	Hits []struct {
-		ID            int    `json:"id"`
-		FullHDURL     string `json:"fullHDURL"`
-		LargeImageURL string `json:"largeImageURL"`
-		PageURL       string `json:"pageURL"`
-	} `json:"hits"`
-}
+	// 创建images文件
 
-func (r *pixRes) GetImageInfo(w *Wallpaper) {
-	var l string
-	// 保存图片信息 id与url用,分离
-	for _, v := range r.Hits {
-		v.LargeImageURL = strings.Replace(v.LargeImageURL, "s", "", 1)
-		l = fmt.Sprintf("%s\n%d,%s", l, v.ID, v.LargeImageURL)
-	}
-	w.ID = strconv.Itoa(r.Hits[0].ID)
-	w.ImageURL = r.Hits[0].LargeImageURL
-
-	// 保存配置
-	fn := fmt.Sprintf("%s/temp.ini", w.Dir)
-	cfg, err := ini.Load(fn)
+	flag.StringVar(&w.Flag, "w", "", "next for changeWallpaper")
+	flag.Parse()
+	//读取wallpaper配置
+	cfg, err := ini.Load(w.CfgPath)
 	if err != nil {
-		log.Println("[err GetImageInfo],Load err:\n", err)
+		log.Fatalf("[err LoadConfig],Load path:\n%s\n,%s\n", w.Dir, err)
+	}
+	w.Type = cfg.Section("wallpaper").Key("type").String()
+	w.TempNum = cfg.Section("wallpaperTemp").Key("tempNum").RangeInt(10, 4, 30)
+	w.ImgSavePath = filepath.ToSlash(cfg.Section("wallpaper").Key("imgSavePath").String())
+
+	// 引擎配置
+	imageIDs := cfg.Section("wallpaperTemp").Key(fmt.Sprintf("%sImageIDs", w.Type)).Strings(",")
+	w.MaxCount = len(imageIDs)
+	w.NowCount = cfg.Section("wallpaperTemp").Key(fmt.Sprintf("%sNowCount", w.Type)).RangeInt(0, 0, 30)
+	// 根据用户路径创建文件
+	err = os.Mkdir(w.ImgSavePath, 0777)
+	if err == nil {
+		// 新建文件成功 初始化配置
+		w.NowCount = 0
+		w.MaxCount = 0
+	} else {
+		if !errors.Is(err, os.ErrExist) {
+			// 路径改变
+			deft := filepath.ToSlash(fmt.Sprintf("%s/images", w.Dir))
+			cfg.Section("wallpaper").Key("imgSavePath").SetValue(deft)
+			cfg.SaveTo(w.CfgPath)
+			w.ImgSavePath = deft
+			if err = os.Mkdir(deft, 0777); err != nil && !errors.Is(err, os.ErrExist) {
+				log.Fatalln("[err create images file in path] \n", deft, "\n", err)
+			}
+			// 新建文件成功 初始化配置
+			w.NowCount = 0
+			w.MaxCount = 0
+		}
 	}
 
-	cfg.Section("wallpaper").Key("pixabayList").SetValue(l)
-	cfg.Section("wallpaper").Key("pixabayCount").SetValue("1")
-	cfg.Section("wallpaper").Key("pixabayLen").SetValue(strconv.Itoa(len(r.Hits)))
-	err = cfg.SaveTo(fn)
-	if err != nil {
-		log.Println("[err GetImageInfo],SaveTo:\n", err)
+	if w.NowCount >= w.MaxCount-1 {
+		w.NextImageID = ""
+	} else {
+		w.NextImageID = imageIDs[w.NowCount+1]
 	}
 
-}
-
-type unsRes struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	Urls        struct {
-		Regular string `json:"regular"`
-	} `json:"urls"`
-}
-
-func (r *unsRes) GetImageInfo(w *Wallpaper) {
-	w.ID = r.ID
-	w.ImageURL = strings.Replace(r.Urls.Regular, "s", "", 1)
-	w.Description = r.Description
-	return
-}
-
-// GetURL 根据关键字获取图片的URL
-func (w *Wallpaper) GetURL() {
-	fmt.Println()
-	log.Println("[log GetURL],START")
-
-	// 从缓存读取
-	cfg, err := ini.Load(fmt.Sprintf("%s/temp.ini", w.Dir))
-	if err != nil {
-		log.Println("[err GetURL],Load:\n", err)
-	}
-
-	var imgURL string
-	var r Wallpaperface
 	switch w.Type {
 	case "pixabay":
-		// 缓存足够读取缓存
-		count, err := cfg.Section("wallpaper").Key("pixabayCount").Int()
-		pixLen, err := cfg.Section("wallpaper").Key("pixabayLen").Int()
-		if err != nil {
-			log.Println("[err GetURL],Int:\n", err)
+		w.Engine = &pixabay{
+			AK:       cfg.Section("wallpaper").Key("pixabayAK").String(),
+			Keywords: strings.ReplaceAll(cfg.Section("wallpaper").Key("keywords").String(), ",", "+"),
 		}
-		if count < pixLen {
-			count++
-			pixList := cfg.Section("wallpaper").Key("pixabayList").Strings("\n")
-			fmt.Println(pixList)
-			pixInfo := strings.Split(pixList[count], ",")
-			w.ID = pixInfo[0]
-			w.ImageURL = pixInfo[1]
-			cfg.Section("wallpaper").Key("pixabayCount").SetValue(strconv.Itoa(count))
-			err = cfg.SaveTo(fmt.Sprintf("%s/temp.ini", w.Dir))
-			if err != nil {
-				log.Println("[err GetURL],Save pixabayCount:\n", err)
-			}
+	default:
+		w.Engine = &unsplash{
+			AK:       cfg.Section("wallpaper").Key("unsplashAK").String(),
+			Keywords: cfg.Section("wallpaper").Key("keywords").String(),
+		}
+	}
+}
+
+func (w *Wallpaper) DownloadImage(id, url string, cbk chan string) {
+	imgName := filepath.ToSlash(fmt.Sprintf("%s/%s.jpg", w.ImgSavePath, id))
+	// 查看本地储存
+	_, err := os.Stat(imgName)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Println("[err os STAT] \n", err)
+			cbk <- ""
 			return
 		}
-		r = &pixRes{}
-		imgURL = fmt.Sprintf("https://pixabay.com/api/?key=%s&q=%s&image_type=photo&orientation=horizontal&min_height=1920&order=latest&pretty=true",
-			w.AK, w.Keywords)
-
-	default:
-		r = &unsRes{}
-		imgURL = fmt.Sprintf("https://api.unsplash.com/photos/random?query=%s&orientation=landscape&featured=true&client_id=%s",
-			w.Keywords, w.AK)
+	} else {
+		cbk <- id
+		log.Println("[info] load local img \n", id)
+		return
 	}
-	log.Println("[log GetURL],imgURL:\n", imgURL)
-	res, err := http.Get(imgURL)
+
+	res, err := http.Get(url)
 	if err != nil {
-		log.Println("[err GetURL],err imgURL:\n", imgURL)
+		log.Println("[err download image],url:\n", url)
+		cbk <- ""
 		return
 	}
 	defer res.Body.Close()
-	bRes, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		log.Println("[err GetURL],err ReadAll:\n", err)
+	if res.StatusCode != 200 {
+		log.Println("[err download image],code:\n", res.Status)
+		cbk <- ""
 		return
 	}
-	err = jsoniter.Unmarshal(bRes, r)
-	if err != nil {
-		log.Println("[err GetURL],err Unmarshal:\n", err)
-		return
-	}
-	r.GetImageInfo(w)
-	log.Println("[log GetURL],ImageURL:\n", w.ImageURL)
-	fmt.Println("[log GetURL],Succ ID = ", w.ID)
-	fmt.Print("\n")
-}
 
-func (w *Wallpaper) Download() {
-	fmt.Println()
-	log.Println("[log Download],START")
-	res, err := http.Get(w.ImageURL)
+	f, err := os.Create(imgName)
 	if err != nil {
-		log.Println("[err Download],Get ImageURL err:\n", err)
+		log.Println("[err create file] \n", err)
+		cbk <- ""
 		return
 	}
-	log.Println("[log Download],ImageURL:\n", w.ImageURL)
-	defer res.Body.Close()
-	// 查看文件夹
-	err = os.Mkdir(fmt.Sprintf("%s/images", w.Dir), 0777)
+	defer f.Close()
+	_, err = io.Copy(f, res.Body)
 	if err != nil {
-		if !errors.Is(err, os.ErrExist) {
-			log.Fatalln("[err download],Mkdir err:\n", err)
-		}
-	}
-	fName := fmt.Sprintf("%s/images/%s.jpg", w.Dir, w.ID)
-	file, err := os.Create(fName)
-	if err != nil {
-		log.Println("[err Download],Create file err:\n, ", err)
+		log.Println("[err copy image] \n", err)
+		cbk <- ""
 		return
 	}
-	defer file.Close()
-	_, err = io.Copy(file, res.Body)
-	if err != nil {
-		log.Println("[err Download],Copy file err:\n", err)
-		return
-	}
-	fmt.Println()
-	log.Println("[log Download],SUCC")
+	log.Println("[info] download img\n", id)
+	cbk <- id
 }
-
-func (w *Wallpaper) ChangeWallpaper() {
-	fpath := filepath.ToSlash(fmt.Sprintf("%s/images/%s.jpg", w.Dir, w.ID))
-	_, err := os.Stat(fpath)
+func (w *Wallpaper) ChangeWallpaper(path string) {
+	log.Println("[info] change wallpaper start \n", path)
+	cfg, err := ini.Load(w.CfgPath)
+	if err != nil {
+		log.Println("[err load cfg] \n", err)
+		return
+	}
+	fpath := filepath.ToSlash(path)
+	_, err = os.Stat(fpath)
 	if errors.Is(err, os.ErrNotExist) {
+		cfg.Section("wallpaperTemp").Key(fmt.Sprintf("%sImageIDs", w.Type)).SetValue("0")
+		if err = cfg.SaveTo(w.CfgPath); err != nil {
+			log.Println("[err save cfg] \n", err)
+		}
 		log.Fatalln("[err ChangeWallpaper],can't find file.")
 		return
 	}
+	w.NowCount++
+	cfg, err = ini.Load(w.CfgPath)
+	if err != nil {
+		log.Println("[err load cfg] \n", err)
+		return
+	}
+	cfg.Section("wallpaperTemp").Key(fmt.Sprintf("%sNowCount", w.Type)).SetValue(strconv.Itoa(w.NowCount))
+	if err = cfg.SaveTo(w.CfgPath); err != nil {
+		log.Println("[err save cfg] \n", err)
+	}
+
 	h := syscall.MustLoadDLL("user32.dll")
 	c := h.MustFindProc("SystemParametersInfoW")
 	defer syscall.FreeLibrary(h.Handle)
@@ -211,8 +186,9 @@ func (w *Wallpaper) ChangeWallpaper() {
 		uintptr(unsafe.Pointer(pvParam)),
 		uintptr(fWinIni))
 	if r2 != 0 {
-		log.Fatalln(r2, err, fpath)
+		log.Println(r2, err, fpath)
 	}
+
 }
 
 func (w *Wallpaper) Hotkey() {
@@ -226,42 +202,80 @@ func (w *Wallpaper) Hotkey() {
 		return
 	}
 	// 键入值运行程序
-	nk.SetStringValue("", w.ExePath)
-
-}
-func (w *Wallpaper) Run() {
-	// 加载配置
-	w.LoadConfig()
-
-	w.GetURL()
-	w.Download()
-	w.ChangeWallpaper()
+	nk.SetStringValue("", fmt.Sprintf("%s -n", w.Exec))
 
 }
 
-func (w *Wallpaper) LoadConfig() {
-	// 读取文件执行路径
-	file, _ := exec.LookPath(os.Args[0])
-	path, _ := filepath.Abs(file)
-	w.ExePath = path
-	dir := filepath.Dir(path)
-	w.Dir = dir
-
-	//读取wallpaper配置
-
-	cfg, err := ini.Load(fmt.Sprintf("%s/config.ini", w.Dir))
+func (w *Wallpaper) downloadAndSaveImages() {
+	urls, err := w.Engine.GetImagesURLs(w.TempNum)
 	if err != nil {
-		log.Fatalf("[err LoadConfig],Load path:\n%s\n,%s\n", w.Dir, err)
+		log.Println("[err get images] \n", err)
+		return
 	}
-	w.Type = cfg.Section("wallpaper").Key("type").String()
-	w.Keywords = cfg.Section("wallpaper").Key("keywords").String()
-	switch w.Type {
-	case "pixabay":
-		w.AK = cfg.Section("wallpaper").Key("pixabayAK").String()
-		// 格式化关键字
-		w.Keywords = strings.ReplaceAll(w.Keywords, ",", "+")
-	default:
-		w.AK = cfg.Section("wallpaper").Key("unsplashAK").String()
+	cb := make(chan string, len(urls))
+	for _, v := range urls {
+		go w.DownloadImage(v[0], v[1], cb)
 	}
+	// 初始化缓存信息
+	// 下载成功文件计数
+	w.MaxCount = 0
+	// 下载次数
+	count := 0
+	var idStrings string
+	flg := false
+	for {
 
+		if flg || count >= len(urls) {
+			break
+		}
+		select {
+		case name := <-cb:
+			count++
+			// 下载成功
+			if name != "" {
+				// 更换壁纸
+				if w.MaxCount == 0 {
+					w.ChangeWallpaper(fmt.Sprintf("%s/%s.jpg", w.ImgSavePath, name))
+				}
+				w.MaxCount++
+				idStrings = fmt.Sprintf("%s,%s", idStrings, name)
+			}
+		case <-time.After(time.Second * 60):
+			flg = true
+		default:
+		}
+	}
+	idStrings = strings.TrimPrefix(idStrings, ",")
+
+	// 保存配置
+	cfg, err := ini.Load(w.CfgPath)
+	if err != nil {
+		log.Println("[err load cfg] \n", err)
+	}
+	cfg.Section("wallpaperTemp").Key(fmt.Sprintf("%sNowCount", w.Type)).SetValue("0")
+	cfg.Section("wallpaperTemp").Key(fmt.Sprintf("%sImageIDs", w.Type)).SetValue(idStrings)
+	err = cfg.SaveTo(w.CfgPath)
+	if err != nil {
+		log.Println("[err save cfg] \n", err)
+	}
+	return
+}
+
+func Run() {
+	var flg bool
+	flag.BoolVar(&flg, "n", false, "use -n change next wallpaper")
+	flag.Parse()
+	w := &Wallpaper{}
+	w.LoadConfig()
+	if !flg {
+		// 加载热键
+		w.Hotkey()
+	}
+	// 优先读取缓存
+	if w.NextImageID != "" {
+		w.ChangeWallpaper(fmt.Sprintf("%s/%s.jpg", w.ImgSavePath, w.NextImageID))
+
+	} else {
+		w.downloadAndSaveImages()
+	}
 }

@@ -4,7 +4,7 @@ Daily provides a series of daily small programs, and currently provides the func
 ## How to Use
 
 ```
-git clone  https://github.com/duttty/ daily.git  
+git clone  https://github.com/duttty/daily.git  
 cd daily  
 go build -ldflags=”-H windowsgui”
 ``` 
