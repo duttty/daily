@@ -6,7 +6,7 @@ Daily provides a series of daily small programs, and currently provides the func
 ```
 git clone  https://github.com/duttty/daily.git  
 cd daily  
-go build -ldflags=”-H windowsgui"
+go build -ldflags="-H windowsgui"
 ``` 
 ## For Use On Windows Platform.
 
