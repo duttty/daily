@@ -32,7 +32,7 @@ func (u *unsplash) GetImagesURLs(num int) (imgs [][]string, err error) {
 		num, u.Keywords, u.AK)
 	res, err := http.Get(url)
 	if err != nil {
-		log.Printf("[err GetImagesURLs],url\n%s\ncode:%d\n", url, res.StatusCode)
+		log.Println("[err GetImagesURLs] url\n", url)
 		return nil, err
 	}
 	defer res.Body.Close()

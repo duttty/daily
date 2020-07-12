@@ -2,7 +2,6 @@ package wallpaper
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -41,8 +40,7 @@ func (w *Wallpaper) LoadConfig() {
 	w.Exec = path
 	w.Dir = filepath.Dir(path)
 	w.CfgPath = filepath.ToSlash(fmt.Sprintf("%s/config.ini", w.Dir))
-	flag.StringVar(&w.Flag, "w", "", "next for changeWallpaper")
-	flag.Parse()
+	w.Flag = "n"
 	//读取wallpaper配置
 	cfg, err := ini.Load(w.CfgPath)
 	if err != nil {
@@ -140,12 +138,18 @@ func (w *Wallpaper) DownloadImage(id, url string, cbk chan string) {
 		return
 	}
 	defer f.Close()
+
+	if err != nil {
+		fmt.Println(err)
+	}
+
 	_, err = io.Copy(f, res.Body)
 	if err != nil {
 		log.Println("[err copy image] \n", err)
 		cbk <- ""
 		return
 	}
+
 	log.Println("[info] download img\n", id)
 	cbk <- id
 }
@@ -226,6 +230,7 @@ func (w *Wallpaper) downloadAndSaveImages() {
 	count := 0
 	var idStrings string
 	flg := false
+	timeOutCH := time.After(time.Second * 60)
 	for {
 
 		if flg || count >= len(urls) {
@@ -243,7 +248,7 @@ func (w *Wallpaper) downloadAndSaveImages() {
 				w.MaxCount++
 				idStrings = fmt.Sprintf("%s,%s", idStrings, name)
 			}
-		case <-time.After(time.Second * 60):
+		case <-timeOutCH:
 			flg = true
 		default:
 		}
@@ -265,15 +270,15 @@ func (w *Wallpaper) downloadAndSaveImages() {
 }
 
 func Run() {
-	var flg bool
-	flag.BoolVar(&flg, "n", false, "use -n change next wallpaper")
-	flag.Parse()
+	// var flg bool
+	// flag.BoolVar(&flg, "n", false, "use -n change next wallpaper")
+	// flag.Parse()
 	w := &Wallpaper{}
 	w.LoadConfig()
-	if !flg {
-		// 加载热键
-		w.Hotkey()
-	}
+	// if !flg {
+	// 	// 加载热键
+	// 	w.Hotkey()
+	// }
 	// 优先读取缓存
 	if w.NextImageID != "" {
 		log.Println("[info read temp] \n", w.NextImageID)
