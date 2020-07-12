@@ -41,9 +41,6 @@ func (w *Wallpaper) LoadConfig() {
 	w.Exec = path
 	w.Dir = filepath.Dir(path)
 	w.CfgPath = filepath.ToSlash(fmt.Sprintf("%s/config.ini", w.Dir))
-
-	// 创建images文件
-
 	flag.StringVar(&w.Flag, "w", "", "next for changeWallpaper")
 	flag.Parse()
 	//读取wallpaper配置
@@ -54,7 +51,15 @@ func (w *Wallpaper) LoadConfig() {
 	w.Type = cfg.Section("wallpaper").Key("type").String()
 	w.TempNum = cfg.Section("wallpaperTemp").Key("tempNum").RangeInt(10, 4, 30)
 	w.ImgSavePath = filepath.ToSlash(cfg.Section("wallpaper").Key("imgSavePath").String())
-
+	if !filepath.IsAbs(w.ImgSavePath) {
+		log.Println("[info LoadCFG] imgSavePath is not Abs\n", w.ImgSavePath)
+		w.ImgSavePath = filepath.ToSlash(fmt.Sprintf("%s/images", w.Dir))
+		cfg.Section("wallpaper").Key("imgSavePath").SetValue(w.ImgSavePath)
+		err = cfg.SaveTo(w.CfgPath)
+		if err != nil {
+			log.Println("[err save new abs path] \n", w.ImgSavePath)
+		}
+	}
 	// 引擎配置
 	imageIDs := cfg.Section("wallpaperTemp").Key(fmt.Sprintf("%sImageIDs", w.Type)).Strings(",")
 	w.MaxCount = len(imageIDs)
@@ -63,30 +68,27 @@ func (w *Wallpaper) LoadConfig() {
 	err = os.Mkdir(w.ImgSavePath, 0777)
 	if err == nil {
 		// 新建文件成功 初始化配置
+		log.Println("[info loadcfg] mkdir succ\nPATH = ", w.ImgSavePath)
 		w.NowCount = 0
 		w.MaxCount = 0
-	} else {
-		if !errors.Is(err, os.ErrExist) {
-			// 路径改变
-			deft := filepath.ToSlash(fmt.Sprintf("%s/images", w.Dir))
-			cfg.Section("wallpaper").Key("imgSavePath").SetValue(deft)
-			cfg.SaveTo(w.CfgPath)
-			w.ImgSavePath = deft
-			if err = os.Mkdir(deft, 0777); err != nil && !errors.Is(err, os.ErrExist) {
-				log.Fatalln("[err create images file in path] \n", deft, "\n", err)
-			}
-			// 新建文件成功 初始化配置
-			w.NowCount = 0
-			w.MaxCount = 0
+	} else if !errors.Is(err, os.ErrExist) {
+		// 路径改变
+		deft := filepath.ToSlash(fmt.Sprintf("%s/images", w.Dir))
+		cfg.Section("wallpaper").Key("imgSavePath").SetValue(deft)
+		cfg.SaveTo(w.CfgPath)
+		w.ImgSavePath = deft
+		if err = os.Mkdir(deft, 0777); err != nil && !errors.Is(err, os.ErrExist) {
+			log.Fatalln("[err create images file in path] \n", deft, "\n", err)
 		}
+		// 新建文件成功 初始化配置
+		w.NowCount = 0
+		w.MaxCount = 0
 	}
-
 	if w.NowCount >= w.MaxCount-1 {
 		w.NextImageID = ""
 	} else {
 		w.NextImageID = imageIDs[w.NowCount+1]
 	}
-
 	switch w.Type {
 	case "pixabay":
 		w.Engine = &pixabay{
@@ -99,6 +101,7 @@ func (w *Wallpaper) LoadConfig() {
 			Keywords: cfg.Section("wallpaper").Key("keywords").String(),
 		}
 	}
+
 }
 
 func (w *Wallpaper) DownloadImage(id, url string, cbk chan string) {
@@ -273,6 +276,7 @@ func Run() {
 	}
 	// 优先读取缓存
 	if w.NextImageID != "" {
+		log.Println("[info read temp] \n", w.NextImageID)
 		w.ChangeWallpaper(fmt.Sprintf("%s/%s.jpg", w.ImgSavePath, w.NextImageID))
 
 	} else {
