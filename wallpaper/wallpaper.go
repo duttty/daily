@@ -2,6 +2,7 @@ package wallpaper
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -270,15 +271,15 @@ func (w *Wallpaper) downloadAndSaveImages() {
 }
 
 func Run() {
-	// var flg bool
-	// flag.BoolVar(&flg, "n", false, "use -n change next wallpaper")
-	// flag.Parse()
+	var flg bool
+	flag.BoolVar(&flg, "n", false, "use -n change next wallpaper")
+	flag.Parse()
 	w := &Wallpaper{}
 	w.LoadConfig()
-	// if !flg {
-	// 	// 加载热键
-	// 	w.Hotkey()
-	// }
+	if !flg {
+		// 加载热键
+		w.Hotkey()
+	}
 	// 优先读取缓存
 	if w.NextImageID != "" {
 		log.Println("[info read temp] \n", w.NextImageID)
